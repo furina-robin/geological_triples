@@ -14,6 +14,10 @@ from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from tenacity import retry, wait_exponential, stop_after_attempt
+import networkx as nx
+import matplotlib.pyplot as plt
+from io import BytesIO
+from docx import Document
 
 # 预设值
 PRESET_TYPES = ["地质工程", "地质特征", "勘测技术", "试验", "地质资料", "工具", "样本"]
@@ -42,7 +46,7 @@ class TextSegmentor:
         if not api_key:
             st.error(f"请提供{provider}的API密钥")
             return None
-            
+
         if provider == "kimi":
             base_url = base_url or "https://api.moonshot.cn/v1"
             return ChatOpenAI(
@@ -123,26 +127,27 @@ class RelationExtractor:
                         ### 具体要求
                         1. **实体识别与分类**：从文本中识别实体，并按照给定的实体类型对它们进行分类：{entity_types}
                             - 实体类型及示例：
-                                - 地质工程(PC) - 示例：改建铁路、边坡工程
-                                - 地质特征(GF) - 示例：砂土层、断裂带
-                                - 勘    测技术(RH) - 示例：地质钻探、物探
-                                - 工具(TL) - 示例：钻机、测量仪
-                                - 地质资料(GI) - 示例：地质勘察报告、剖面图
-                                - 样本(SP) - 示例：岩芯样本、土样
-                                - 试验(EP) - 示例：承载力试验、渗透试验
+                                - 地质工程 - 示例：改建铁路、边坡工程
+                                - 地质特征 - 示例：砂土层、断裂带
+                                - 勘测技术 - 示例：地质钻探、物探
+                                - 工具- 示例：钻机、测量仪
+                                - 地质资料 - 示例：地质勘察报告、剖面图
+                                - 样本 - 示例：岩芯样本、土样
+                                - 试验 - 示例：承载力试验、渗透试验
                         2. **关系推断**：根据上下文以及结合地质领域的专业知识推断实体间的逻辑关系。
-                        3. **关系类型筛选**：关系类型为：{predicate_list}。如果推断的关系不在给定的类型中：
-                            - 若与给定关系类型所表述的意思一致，则替换为给定关系类型。
-                            - 若与给定关系类型所表述的意思不一致，则忽略该三元组。
+                        3. **关系类型筛选**：关系类型范围如下：{predicate_list}。如果推断的关系不在给定的类型中：
+                            - 若其与给定关系类型集合中的某一种关系所表述的意思一致，则替换为给定关系类型。
+                            - 若其与给定关系类型集合中任一关系表述的意思都不一致，则过滤该三元组。
                         4. **三元组完整性**：每个三元组必须包含完整要素。
 
                         ### 避免提取内容
                         1. 抽象概念，如“本规范第四章”。
                         2. 泛指表述，如“相关要求”。
                         3. 不属于地质勘探领域的内容。
+                        4. 包含数字、单位、符号等不属于地质勘探领域知识的内容
 
                         ### 返回格式
-                        返回格式示例：[地质钻探|GF]→用于→[断裂带|GF]，不要包含*号等特殊符号，不要提取纯数字、比例尺等无意义内容。                       
+                        返回格式示例：[地质钻探|GF]→用于→[断裂带|GF]，不要包含*号等特殊符号，不要提取数字、比例尺等无意义内容。                       
                         """
         
         self.prompt = PromptTemplate(
@@ -172,7 +177,7 @@ class RelationExtractor:
         if not api_key:
             st.error(f"请提供{provider}的API密钥")
             return None
-            
+
         if provider == "kimi":
             base_url = base_url or "https://api.moonshot.cn/v1"
             return ChatOpenAI(
@@ -221,6 +226,12 @@ class RelationExtractor:
                     relations[(source, target)] = rel.strip()
         return relations
 
+    def learn_from_docx(self, docx_content: bytes) -> str:
+        """从DOCX文档中提取学习内容"""
+        doc = Document(BytesIO(docx_content))
+        learned_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        return learned_text[:5000]  # 限制学习长度
+    
     def _preprocess_text(self, text: str) -> str:
         text = re.sub(r'\d+[)、.]', '', text)
         return re.sub(r'；', '。', text)
@@ -311,14 +322,16 @@ class RelationExtractor:
             line = line.replace("：", ":").strip()
             if match := pattern.search(line):
                 subj, subj_type, pred, obj, obj_type = match.groups()
-                triples.append({
-                    "subject": subj.strip(),
-                    "subject_type": TYPE_MAP.get(subj_type.strip(), subj_type),
-                    "predicate": pred.strip(),
-                    "object": obj.strip(),
-                    "object_type": TYPE_MAP.get(obj_type.strip(), obj_type),
-                    "validated": False
-                })
+                pred = pred.strip()
+                if pred in self.validation_rules['predicate_whitelist']:
+                    triples.append({
+                        "subject": subj.strip(),
+                        "subject_type": TYPE_MAP.get(subj_type.strip(), subj_type),
+                        "predicate": pred,
+                        "object": obj.strip(),
+                        "object_type": TYPE_MAP.get(obj_type.strip(), obj_type),
+                        "validated": False
+                    })
         return triples
 
     def _check_relation(self, context: str, triple: Dict) -> bool:
@@ -326,6 +339,9 @@ class RelationExtractor:
             return False
         
         if len(triple['subject']) < 2 or len(triple['object']) < 2:
+            return False
+
+        if triple['predicate'] not in self.validation_rules['predicate_whitelist']:
             return False
 
         return True
@@ -579,7 +595,6 @@ def main():
 
     # 主内容区域 - 直接用条件判断，不需要额外函数
     if st.session_state.current_tab == 'config':
-        # ========== 配置页面内容（原tab_config内容） ==========
         st.header("API配置")
         st.info("请在此配置用于分句和关系提取的API服务")
         
@@ -595,10 +610,12 @@ def main():
                     key = "seg_provider_select"
             )
             provider = st.session_state.provider_config['seg']['provider']
+        
+
             model_options = {
                 "kimi": ["moonshot-v1-128k", "moonshot-v1-32k"],
                 "qwen": ["qwen-max", "qwen-plus", "qwen-turbo"],
-                "doubao": ["doubao-seed-1-6-250615", "doubao-1-5-pro-32k-250115"],
+                "doubao": ["doubao-seed-1-6-250615", "doubao-1-5-pro-32k-250115",'doubao-1-5-thinking-pro-250415'],
                 "deepseek": ["deepseek-chat", "deepseek-reasoner"]
             }
 
@@ -612,7 +629,6 @@ def main():
                 ),
                 key=f"seg_{provider}_model"
             )
-
             st.session_state.provider_config['seg'][provider]['api_key'] = st.text_input(
                 f"{provider.upper()} API密钥",
                 value=st.session_state.provider_config['seg'][provider]['api_key'],
@@ -636,10 +652,13 @@ def main():
             )
             
             provider = st.session_state.provider_config['extract']['provider']
+        
+            
             model_options = {
+                "QWQ": ["free:QwQ-32B"],
                 "deepseek": ["deepseek-chat", "deepseek-reasoner"],
                 "qwen": ["qwen-max", "qwen-plus", "qwen-turbo"],
-                "doubao": ["doubao-1-5-pro-32k-250115", "doubao-seed-1-6-250615"],
+                "doubao": ["doubao-1-5-pro-32k-250115", "doubao-seed-1-6-250615",'doubao-1-5-thinking-pro-250415'],
                 "kimi": ["moonshot-v1-128k", "moonshot-v1-32k"]
             }
             current_models = model_options.get(provider, ["default-model"])
@@ -653,12 +672,15 @@ def main():
                 index=current_models.index(current_model),
                 key=f"extract_{provider}_model"
             )
+
+            
             st.session_state.provider_config['extract'][provider]['api_key'] = st.text_input(
                 f"{provider.upper()} API密钥",
                 value=st.session_state.provider_config['extract'][provider]['api_key'],
                 type="password",
                 key=f"extract_{provider}_api_key"
             )
+            
             st.session_state.provider_config['extract'][provider]['base_url'] = st.text_input(
                 f"{provider.upper()} API地址",
                 value=st.session_state.provider_config['extract'][provider]['base_url'],
@@ -680,20 +702,19 @@ def main():
 
         st.subheader("使用说明")
         st.markdown("""
-        1. **Kimi**: 用于将长文本分割成有意义的段落
-        2. **DeepSeek**: 用于从段落中提取地质工程三元组
-        3. **豆包(Doubao)**: 支持分句和关系提取服务
-        4. **QWEN**: 支持分句和关系提取服务
+        - 本站提供各种大模型api接口，用户可以自行选择适合任务要求的大模型调用
         """)
         
     elif st.session_state.current_tab == 'extract':
-        # ========== 文本提取页面内容（原tab1内容） ==========
+        # ========== 文本提取页面内容 ==========
         st.header("地质文本三元组提取")
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("上传文本")
-            text_file = st.file_uploader("上传地质工程文本文件", type=["txt"])
+            st.subheader("上传DOCX文件（可选）")
+            docx_file = st.file_uploader("上传地质资料文件", type=["docx"])
+            st.subheader("上传地质文本TXT文件")
+            text_file = st.file_uploader("上传待提取的地质工程文件", type=["txt"])
             text_content = st.text_area("或直接输入文本内容", height=300)
             
             st.subheader("关系规则 (可选)")
@@ -716,12 +737,26 @@ def main():
             if not api_ready:
                 st.warning("请先在⚙️配置页面完成API密钥设置")
             elif not input_ready:
-                st.warning("请上传文本文件或输入文本内容")
+                st.warning("请上传TXT文件或输入文本内容")
             
             if st.button("开始提取三元组", 
                     use_container_width=True,
                     disabled=button_disabled):
                 
+                if docx_file:  # 新增
+                    with st.spinner("正在学习DOCX文档内容..."):
+                        extractor = RelationExtractor(
+                            provider_config=st.session_state.provider_config,
+                            relation_rules=rules
+                        )
+                        learned_content = extractor.learn_from_docx(docx_file.getvalue())
+                        st.session_state.learned_content = learned_content  # 存储学习内容
+                
+                text = text_content if text_content else text_file.read().decode("utf-8")
+                # 将学习内容合并到输入文本
+                if docx_file:  # 新增
+                    text = f"文档知识参考：{st.session_state.learned_content}\n\n待分析文本：{text}"
+
                 text = text_content if text_content else text_file.read().decode("utf-8")
                 rules = rules_file.read().decode("utf-8") if rules_file else None
                 
@@ -763,13 +798,12 @@ def main():
                     st.info("该段落未提取到三元组")
 
     elif st.session_state.current_tab == 'correct':
-        # ========== 三元组校正页面内容（原tab2内容） ==========
+        # ========== 三元组校正页面内容 ==========
+
         if not st.session_state.extracted_data:
-            st.info("请先在'文本提取'页面提取三元组")
+            st.warning("请先在'文本提取'页面提取三元组")
         else:
             st.header("三元组校正")
-            # 你的原始tab2内容...
-            st.info("三元组校正功能（请将原tab2的完整内容复制到这里）")
             if not st.session_state.extracted_data:
                 with st.spinner('🌀 正在加载数据...'):
                     time.sleep(0.5)  # 模拟加载过程
@@ -957,20 +991,15 @@ def main():
                 st.metric("新增个数", added_count)
             
     elif st.session_state.current_tab == 'export':
-        # ========== 导出结果页面内容（原tab3内容） ==========
+        # ========== 导出结果页面内容 ==========
         if not st.session_state.extracted_data:
-            st.info("请先在'文本提取'页面提取三元组")
+            
+            st.warning("请先在'文本提取'页面提取三元组")
         else:
             st.header("导出结果")
-            # 你的原始tab3内容...
-            st.info("导出结果功能（请将原tab3的完整内容复制到这里）")
             if not st.session_state.extracted_data:
                 st.info("请先在'文本提取'标签页提取三元组")
                 return
-            
-            st.header("导出结果")
-
-
             
             data = st.session_state.extracted_data
             
@@ -1078,10 +1107,7 @@ def main():
             }
                     """)
     elif st.session_state.current_tab == 'assistant':
-        # ========== AI助手页面内容（原tab4内容） ==========
         st.header("智能提示词助手")
-        # 你的原始tab4内容...
-        st.info("AI助手功能（请将原tab4的完整内容复制到这里）")
         if st.session_state.extracted_data:
             with st.expander("📌 当前提取内容参考", expanded=True):
                 st.caption("以下为最新提取内容，可用于提示词优化参考")
@@ -1111,21 +1137,23 @@ def main():
             return
         provider = st.session_state.assistant_provider
         try:
+            provider = st.session_state.assistant_provider
+            config = None
+
             # 判断服务商属于分句还是关系提取服务
             if provider in st.session_state.provider_config['seg']:
                 config = st.session_state.provider_config['seg'][provider]
-            else:
+            elif provider in st.session_state.provider_config['extract']:
                 config = st.session_state.provider_config['extract'][provider]
                 
-            if not config.get('api_key'):
-                st.error(f"{provider} API密钥未配置，请前往⚙️配置页面设置")
+            if not config or not config.get('api_key'):
+                st.error(f"【关键修复】{provider} API密钥未正确配置，请确认：")
+                st.error("1. 已在配置页面保存过该服务商的配置")
+                st.error("2. 模型选择与API密钥匹配")
                 return
         except KeyError as e:
             st.error(f"服务商配置错误: {str(e)}，请检查配置页面")
             return
-
-        st.header("智能提示词助手")
-        
         
         if "prompt_history" not in st.session_state:
             st.session_state.prompt_history = []
@@ -1161,58 +1189,87 @@ def main():
         if prompt := st.chat_input("请输入您对提示词的改进要求"):
             # 初始化智能助手
             assistant = ChatOpenAI(
-            api_key=config['api_key'],
-            base_url=config['base_url'],
-            model=config['model'],
-            temperature=0.5
-        )
+                api_key=config['api_key'],
+                base_url=config['base_url'],
+                model=config['model'],
+                temperature=0.5
+            )
             # 构建系统提示
-            system_prompt = f"""你是一个专门用于地质工程领域的三元组提取提示词优化助手。请直接返回修改后的完整提示词模板，严格遵循以下格式：
+            system_prompt = f"""作为专业的提示词优化专家，请按以下要求改进关系提取提示词：
+    
+            ### 改进目标
+            1. 保持核心要素：实体类型({PRESET_TYPES})、关系类型({PRESET_PREDICATES})
+            2. 优化指令清晰度，减少歧义
+            3. 增强领域专业性（地质工程）
+            4. 保持变量占位符：{{text}}, {{entity_types}}, {{predicate_list}}
 
-                ## 关系提取
-                【在此编写完整的改进后提示词模板】
-                必须包含所有变量占位符如{{text}}、{{entity_types}}、{{predicate_list}}
-                保持原有核心要素，仅优化地质领域相关部分
+            ### 格式规范
+            #### 关系提取
+            [在此编写改进后的完整提示词]
+            - 使用中文标点
+            - 避免Markdown格式
+            - 包含完整示例
 
-                ## 分段规则
-                【在此编写完整的改进后分句规则】
-                保持原有分段逻辑，强化地质特征识别
+            ### 修改示例
+            原句：请提取相关关系
+            改为：请根据地质工程规范，识别[主体类型]与[客体类型]之间的{PRESET_PREDICATES}关系
 
-                当前实体类型：{PRESET_TYPES}
-                当前关系类型：{PRESET_PREDICATES}
-                现有提示模板：
-                {json.dumps(PRESET_PROMPTS, indent=2, ensure_ascii=False)}"""
+            当前模板：
+            {json.dumps(PRESET_PROMPTS['关系提取'], indent=2, ensure_ascii=False)}
+            """
             
-            # 执行对话
-            st.session_state.messages.append({"role": "user", "content": prompt})
+            # 添加输入预处理
+            cleaned_prompt = re.sub(r'[模糊|大概|可能]', '', prompt)  # 去除模糊表述
+            if len(cleaned_prompt) < 10:
+                st.warning("请提供更具体的改进需求，例如：'需要增加实体类型示例'")
+                return
+
+             # 执行对话
+            st.session_state.messages.append({"role": "user", "content": cleaned_prompt})
             with st.chat_message("assistant"):
-                response = assistant.invoke([
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=prompt)
-                ])
-                st.markdown(response.content)
-                st.session_state.messages.append({"role": "assistant", "content": response.content})
-                col_accept, col_reject = st.columns(2)
+                try:
+                    response = assistant.invoke([
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=cleaned_prompt)
+                    ])
+                    
+                    # 添加后处理验证
+                    if not re.search(r'\{entity_types\}.*?\{predicate_list\}', response.content):
+                        raise ValueError("提示词缺少必要变量")
+                        
+                    st.markdown(response.content)
+                    
+                    # 添加格式美化
+                    st.markdown("---")
+                    with st.expander("✅ 验证通过"):
+                                st.caption("包含必要要素：")
+                                cols = st.columns(3)
+                                cols[0].success("实体类型")
+                                cols[1].success("关系类型") 
+                                cols[2].success("变量占位符")
             
-            
-                with col_accept:
-                    if st.button("✅ 接受建议", key="accept_btn"):
-                        updated_prompts = parse_prompt_update(response.content)
-                        if updated_prompts:
-                            PRESET_PROMPTS.update(updated_prompts)
-                            st.session_state.prompt_history.append({
-                                "original": PRESET_PROMPTS.copy(),
-                                "modified": updated_prompts
-                            })
-                            st.session_state.extracted_data = None
+                    col_accept, col_reject = st.columns(2)
+                    with col_accept:
+                        if st.button("✅ 接受建议", key="accept_btn"):
+                            updated_prompts = parse_prompt_update(response.content)
+                            if updated_prompts:
+                                PRESET_PROMPTS.update(updated_prompts)
+                                st.session_state.prompt_history.append({
+                                    "original": PRESET_PROMPTS.copy(),
+                                    "modified": updated_prompts
+                                })
+                                st.session_state.extracted_data = None
+                                st.rerun()
+                    
+                    with col_reject:
+                        if st.button("❌ 拒绝建议", key="reject_btn"):
+                            st.session_state.messages.pop()
                             st.rerun()
-                    else:
-                        st.error("未检测到有效的提示词修改，请确认格式符合要求")
 
-                with col_reject:
-                    if st.button("❌ 拒绝建议", key="reject_btn"):
-                        st.session_state.messages.pop()  # 移除最后一条AI消息
-                        st.rerun()
+                except Exception as e:
+                    st.error(f"优化失败：{str(e)}")
+                    st.info("请尝试更明确的修改要求，例如：'需要更严格的关系类型过滤'")
+
 
 
 if __name__ == "__main__":
