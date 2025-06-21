@@ -14,8 +14,6 @@ from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from tenacity import retry, wait_exponential, stop_after_attempt
-import networkx as nx
-import matplotlib.pyplot as plt
 from io import BytesIO
 from docx import Document
 
