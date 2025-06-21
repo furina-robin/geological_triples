@@ -5,4 +5,4 @@ langchain-openai
 openai
 tenacity
 io
-docx
+python-docx
