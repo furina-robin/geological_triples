@@ -4,4 +4,5 @@ langchain
 langchain-openai
 openai
 tenacity
-iopython-docx>=0.8.11
+io
+python-docx>=0.8.11
