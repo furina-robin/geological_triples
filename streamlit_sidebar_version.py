@@ -14,6 +14,9 @@ from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from tenacity import retry, wait_exponential, stop_after_attempt
+from io import BytesIO
+from docx import Document
+
 
 # 预设值
 PRESET_TYPES = ["地质工程", "地质特征", "勘测技术", "试验", "地质资料", "工具", "样本"]
