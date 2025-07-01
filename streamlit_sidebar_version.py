@@ -15,7 +15,7 @@ from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from tenacity import retry, wait_exponential, stop_after_attempt
 from io import BytesIO
-from docx import Document
+
 
 
 # 预设值
